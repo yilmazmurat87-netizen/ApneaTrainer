@@ -8,8 +8,10 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -20,20 +22,60 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Accept licenses & install build tools
+      # Lisans ve SDK kurulumunu sağlam yapan blok
+      - name: Accept licenses & install build tools (robust)
+        shell: bash
+        env:
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
         run: |
-          yes | sdkmanager --licenses
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.2"
+          set -euxo pipefail
 
-      - name: Unzip project
-        run: unzip -o ApneaTrainerProject.zip -d $GITHUB_WORKSPACE
+          # Bazı runner'larda cmdline-tools eksik gelebiliyor, garantiye al
+          sdkmanager --list || true
+          yes | sdkmanager --licenses || true
+          sdkmanager "cmdline-tools;latest" || true
 
+          # En güncel cmdline-tools'u PATH'e ekle
+          export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+
+          # Lisansları tekrar kabul et (idempotent)
+          yes | sdkmanager --licenses || true
+
+          # Gerekli paketler (ağ hatasına karşı bir kez retry)
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.2" || {
+            sleep 5
+            sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.2"
+          }
+
+          echo "SDK root: $ANDROID_SDK_ROOT"
+          which sdkmanager
+          sdkmanager --list | head -n 50
+
+      # Zip'i köke aç ve proje kökünü doğru hizala
+      - name: Unzip project & move to repo root
+        shell: bash
+        run: |
+          unzip -o ApneaTrainerProject.zip -d "$GITHUB_WORKSPACE"
+
+          # Eğer zip, tek bir üst klasörle açılıyorsa (örn. ApneaTrainer/)
+          if [ -d "$GITHUB_WORKSPACE/ApneaTrainer" ]; then
+            shopt -s dotglob
+            mv "$GITHUB_WORKSPACE/ApneaTrainer/"* "$GITHUB_WORKSPACE"/
+            rmdir "$GITHUB_WORKSPACE/ApneaTrainer"
+          fi
+
+          echo "Repo kök içeriği:"
+          ls -la
+          test -f "$GITHUB_WORKSPACE/build.gradle.kts" || (echo "HATA: build.gradle.kts kökte yok" && exit 1)
+
+      # Gradle wrapper olmadan Gradle 8.7 ile derle
       - name: Build Debug APK
         uses: gradle/gradle-build-action@v3
         with:
           gradle-version: 8.7
           arguments: assembleDebug
 
+      # Çıkan APK'yi artefakt olarak yükle
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
